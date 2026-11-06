@@ -54,8 +54,7 @@ void processInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) cameraPos -= speed * cameraUp;
 
     if (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS) {
-        pitch = -89.0f;
-        yaw = -90.0f;
+        pitch = -89.0f; yaw = -90.0f;
         glm::vec3 front;
         front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
         front.y = sin(glm::radians(pitch));
@@ -63,8 +62,8 @@ void processInput(GLFWwindow* window) {
         cameraFront = glm::normalize(front);
     }
 
-    cameraPos.x = glm::clamp(cameraPos.x, -3.8f, 3.8f);
-    cameraPos.z = glm::clamp(cameraPos.z, -3.8f, 3.8f);
+    cameraPos.x = glm::clamp(cameraPos.x, -3.4f, 3.4f);
+    cameraPos.z = glm::clamp(cameraPos.z, -3.4f, 3.4f);
     cameraPos.y = glm::clamp(cameraPos.y, 0.3f, 3.7f);
 }
 
@@ -201,6 +200,11 @@ struct Vertex { glm::vec3 pos; glm::vec3 normal; glm::vec2 texCoord; };
 std::vector<Vertex> cubeVerts;
 std::vector<unsigned int> cubeIndices;
 
+std::vector<Vertex> cylinderVerts, sphereVerts;
+std::vector<unsigned int> cylinderIndices, sphereIndices;
+unsigned int cylVAO, cylVBO, cylEBO;
+unsigned int sphVAO, sphVBO, sphEBO;
+
 void buildCube() {
     glm::vec3 n[6] = { {0,0,1},{0,0,-1},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0} };
     glm::vec2 uv[4] = { {0,0}, {1,0}, {1,1}, {0,1} };
@@ -213,6 +217,74 @@ void buildCube() {
         unsigned int bi = f * 4;
         cubeIndices.insert(cubeIndices.end(), { bi, bi + 1, bi + 2, bi, bi + 2, bi + 3 });
     }
+}
+
+void buildCylinder() {
+    int segments = 32;
+    float radius = 0.5f;
+    float halfHeight = 0.5f;
+    for (int i = 0; i <= segments; ++i) {
+        float angle = 2.0f * glm::pi<float>() * i / segments;
+        float x = cos(angle) * radius;
+        float z = sin(angle) * radius;
+        glm::vec3 n = glm::normalize(glm::vec3(x, 0.0f, z));
+        glm::vec2 uv = glm::vec2((float)i / segments, 0.0f);
+        cylinderVerts.push_back({ glm::vec3(x, halfHeight, z), n, uv });
+        cylinderVerts.push_back({ glm::vec3(x, -halfHeight, z), n, glm::vec2(uv.x, 1.0f) });
+    }
+    for (int i = 0; i < segments; ++i) {
+        int base = i * 2;
+        cylinderIndices.push_back(base);
+        cylinderIndices.push_back(base + 1);
+        cylinderIndices.push_back(base + 2);
+        cylinderIndices.push_back(base + 2);
+        cylinderIndices.push_back(base + 1);
+        cylinderIndices.push_back(base + 3);
+    }
+}
+
+void buildSphere() {
+    int sectors = 32;
+    int stacks = 16;
+    float radius = 0.5f;
+    for (int i = 0; i <= stacks; ++i) {
+        float V = (float)i / stacks;
+        float phi = V * glm::pi<float>();
+        for (int j = 0; j <= sectors; ++j) {
+            float U = (float)j / sectors;
+            float theta = U * (glm::pi<float>() * 2.0f);
+            float x = cos(theta) * sin(phi);
+            float y = cos(phi);
+            float z = sin(theta) * sin(phi);
+            glm::vec3 pos = glm::vec3(x, y, z) * radius;
+            sphereVerts.push_back({ pos, glm::normalize(pos), glm::vec2(U, V) });
+        }
+    }
+    for (int i = 0; i < stacks; ++i) {
+        for (int j = 0; j < sectors; ++j) {
+            int first = (i * (sectors + 1)) + j;
+            int second = first + sectors + 1;
+            sphereIndices.push_back(first);
+            sphereIndices.push_back(second);
+            sphereIndices.push_back(first + 1);
+            sphereIndices.push_back(second);
+            sphereIndices.push_back(second + 1);
+            sphereIndices.push_back(first + 1);
+        }
+    }
+}
+
+void setupMesh(unsigned int& VAO, unsigned int& VBO, unsigned int& EBO, 
+               const std::vector<Vertex>& verts, const std::vector<unsigned int>& indices) {
+    glGenVertexArrays(1, &VAO); glGenBuffers(1, &VBO); glGenBuffers(1, &EBO);
+    glBindVertexArray(VAO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(Vertex), verts.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0); glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, normal)); glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, texCoord)); glEnableVertexAttribArray(2);
 }
 
 enum ObjectType { FLOOR, WALL, FRAME, PAINTING, LAMP, SCULPTURE, CEILING, GOLD_BAR, RED_RIBBON };
@@ -286,7 +358,7 @@ private:
         const aiScene* scene = importer.ReadFile(path, aiProcess_Triangulate | aiProcess_FlipUVs | aiProcess_GenNormals);
 
         if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
-            std::cout << "ERROR::ASSIMP:: " << importer.GetErrorString() << std::endl;
+            std::cout << "ERROR::ASSIMP:: " << importer.GetErrorString() << " (path: " << path << ")" << std::endl;
             return;
         }
         processNode(scene->mRootNode, scene);
@@ -328,12 +400,74 @@ private:
 };
 // ===========================================
 
+void addGoldBarsAndRibbons(std::vector<Object>& objects, glm::vec3 center, float yawDeg,
+    const Material& matGold, const Material& matRibbon) {
+    float offset = 0.8f;          
+    float barY = 0.5f;            
+    float barHeight = 1.0f;
+    float barThickness = 0.05f;
+    float ribbonY = 0.8f;         
+    float ribbonThickness = 0.02f;
+    float ribbonWidth = offset * 2.0f; 
+
+    glm::vec3 corners[4] = {
+        {-offset, 0.0f, -offset},
+        { offset, 0.0f, -offset},
+        {-offset, 0.0f,  offset},
+        { offset, 0.0f,  offset}
+    };
+
+    float rad = glm::radians(yawDeg);
+    for (int i = 0; i < 4; i++) {
+        glm::vec3 rotated = glm::vec3(
+            corners[i].x * cos(rad) - corners[i].z * sin(rad),
+            0.0f,
+            corners[i].x * sin(rad) + corners[i].z * cos(rad)
+        );
+        glm::vec3 finalPos = center + rotated;
+        finalPos.y = barY;
+        objects.push_back({ finalPos, {barThickness, barHeight, barThickness}, matGold, 0, GOLD_BAR });
+    }
+
+    glm::vec3 ribbonDirs[4] = {
+        {0.0f, 0.0f, -offset},
+        {0.0f, 0.0f,  offset},
+        {-offset, 0.0f, 0.0f},
+        { offset, 0.0f, 0.0f}
+    };
+    glm::vec3 ribbonScales[4] = {
+        {ribbonWidth, ribbonThickness, 0.04f},
+        {ribbonWidth, ribbonThickness, 0.04f},
+        {0.04f, ribbonThickness, ribbonWidth},
+        {0.04f, ribbonThickness, ribbonWidth}
+    };
+
+    for (int i = 0; i < 4; i++) {
+        glm::vec3 rotatedDir = glm::vec3(
+            ribbonDirs[i].x * cos(rad) - ribbonDirs[i].z * sin(rad),
+            0.0f,
+            ribbonDirs[i].x * sin(rad) + ribbonDirs[i].z * cos(rad)
+        );
+        glm::vec3 finalPos = center + rotatedDir;
+        finalPos.y = ribbonY;
+        objects.push_back({ finalPos, ribbonScales[i], matRibbon, 0, RED_RIBBON, glm::vec3(0.0f, yawDeg, 0.0f) });
+    }
+}
+
+struct StatueTransform {
+    Model* model;
+    glm::vec3 position;
+    float yawDeg;
+    float scale;
+    unsigned int textureID;
+};
+
 int main() {
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Museum (Realistic Cat Statue)", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Museum (Three Statues + Door)", nullptr, nullptr);
     glfwMakeContextCurrent(window);
     glfwSetCursorPosCallback(window, mouse_callback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
@@ -341,6 +475,8 @@ int main() {
     glEnable(GL_DEPTH_TEST);
 
     buildCube();
+    buildCylinder();
+    buildSphere();
 
     unsigned int VAO, VBO, EBO;
     glGenVertexArrays(1, &VAO); glGenBuffers(1, &VBO); glGenBuffers(1, &EBO);
@@ -353,16 +489,21 @@ int main() {
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, normal)); glEnableVertexAttribArray(1);
     glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, texCoord)); glEnableVertexAttribArray(2);
 
+    setupMesh(cylVAO, cylVBO, cylEBO, cylinderVerts, cylinderIndices);
+    setupMesh(sphVAO, sphVBO, sphEBO, sphereVerts, sphereIndices);
+
     unsigned int depthProgram = createProgram(depthVS, depthFS);
     unsigned int mainProgram = createProgram(mainVS, mainFS);
 
-    // Загрузка текстур
     unsigned int woodTexture = loadTexture("wood.jpg");
     unsigned int floorTexture = loadTexture("floor.jpg");
     unsigned int marbleTexture = loadTexture("marble.jpg");
-    unsigned int catTexture = loadTexture("models/cat_diffuse.jpg");
-    unsigned int goldTexture = loadTexture("gold.jpg");     // текстура золота
-    unsigned int ribbonTexture = loadTexture("ribbon.jpg");   // текстура ленты
+    unsigned int goldTexture = loadTexture("gold.jpg");
+    unsigned int ribbonTexture = loadTexture("ribbon.jpg");
+
+    unsigned int catTex = loadTexture("models/cat_diffuse.jpg");
+    unsigned int horseTex = loadTexture("models/horse_diffuse.jpg");
+    unsigned int lionTex = loadTexture("models/lion_diffuse.jpg");
 
     unsigned int paintTex[6];
     for (int i = 0; i < 6; i++) {
@@ -370,11 +511,15 @@ int main() {
         paintTex[i] = loadTexture(path.c_str());
     }
 
-    // Загрузка 3D модели
-    Model* statue = new Model("models/concrete_cat_statue_4k.gltf");
-    if (statue->meshes.empty()) {
-        std::cout << "WARNING: statue model has no meshes (check path/assets)" << std::endl;
-    }
+    Model* catModel = new Model("models/concrete_cat_statue_4k.gltf");
+    Model* horseModel = new Model("models/horse_head_4k.gltf");
+    Model* lionModel = new Model("models/lion_head_4k.gltf");
+
+    std::vector<StatueTransform> statues = {
+        { lionModel,  glm::vec3(0.0f, 0.30f, -2.6f),   0.0f, 3.5f, lionTex },
+        { horseModel, glm::vec3(-2.9f, 0.30f,  0.0f),  90.0f, 3.5f, horseTex },
+        { catModel,   glm::vec3(2.9f, 0.30f,  0.0f), -90.0f, 5.0f, catTex }
+    };
 
     unsigned int depthMapFBO, depthMap;
     glGenFramebuffers(1, &depthMapFBO); glGenTextures(1, &depthMap);
@@ -398,46 +543,40 @@ int main() {
     glm::mat4 lightView = glm::lookAt(lightPos, glm::vec3(0.0f), glm::vec3(0, 1, 0));
     glm::mat4 lightSpaceMatrix = lightProj * lightView;
 
-    // Материалы
-    Material matFloor = { {0.55f, 0.27f, 0.07f}, 0.2f, 0.8f, 0.0f,  1.0f,   false, true };
-    Material matWall = { {0.9f, 0.9f, 0.9f},    0.2f, 0.8f, 0.0f,  1.0f,   false, false };
-    Material matCeiling = { {0.5f, 0.5f, 0.5f},    0.2f, 0.6f, 0.1f,  8.0f,   false, false };
-    Material matWood = { {1.0f, 1.0f, 1.0f},    0.2f, 0.9f, 0.0f,  1.0f,   false, true };
-    Material matPaint = { {1.0f, 1.0f, 1.0f},    0.2f, 0.8f, 0.0f,  1.0f,   false, true };
-    Material matLamp = { {1.0f, 1.0f, 1.0f},    1.0f, 0.0f, 0.0f,  1.0f,   true,  false };
-    Material matMarble = { {1.0f, 1.0f, 1.0f},    0.3f, 0.6f, 0.5f,  64.0f,  false, true };
-    Material matPedestal = { {0.85f, 0.85f, 0.85f}, 0.25f,0.7f, 0.2f,  32.0f,  false, false };
-
-    // Золото и лента теперь используют ТЕКСТУРЫ
-    Material matGold = { {1.0f, 0.84f, 0.0f}, 0.4f, 0.8f, 1.0f, 128.0f, false, true };
-    Material matRibbon = { {0.8f, 0.0f, 0.0f},  0.5f, 0.5f, 0.2f,  16.0f, false, true };
+    Material matFloor = { {0.55f, 0.27f, 0.07f}, 0.2f, 0.8f, 0.0f,  1.0f,  false, true };
+    Material matWall = { {0.9f, 0.9f, 0.9f},    0.2f, 0.8f, 0.0f,  1.0f,  false, false };
+    Material matCeiling = { {0.5f, 0.5f, 0.5f},    0.2f, 0.6f, 0.1f,  8.0f,  false, false };
+    Material matWood = { {1.0f, 1.0f, 1.0f},    0.2f, 0.9f, 0.0f,  1.0f,  false, true };
+    Material matPaint = { {1.0f, 1.0f, 1.0f},    0.2f, 0.8f, 0.0f,  1.0f,  false, true };
+    Material matLamp = { {1.0f, 1.0f, 1.0f},    1.0f, 0.0f, 0.0f,  1.0f,  true,  false };
+    Material matMarble = { {1.0f, 1.0f, 1.0f},    0.3f, 0.6f, 0.5f,  64.0f, false, true };
+    Material matPedestal = { {0.85f, 0.85f, 0.85f}, 0.25f,0.7f, 0.2f,  32.0f, false, false };
+    Material matGold = { {1.0f, 0.84f, 0.0f},   0.4f, 0.8f, 1.0f,  128.0f,false, true };
+    Material matRibbon = { {0.8f, 0.0f, 0.0f},    0.5f, 0.5f, 0.2f,  16.0f, false, true };
 
     std::vector<Object> objects = {
-        // Пол
         {{0, -0.05f, 0}, {8.0f, 0.1f, 8.0f}, matFloor, 0, FLOOR},
-
-        // Потолок (серый)
         {{0, 4.0f, 0}, {8.0f, 0.1f, 8.0f}, matCeiling, 0, CEILING},
+        {{0, 2.0f, -4.0f}, {8.0f, 4.0f, 0.1f}, matWall, 0, WALL},
+        {{-4.0f, 2.0f, 0}, {0.1f, 4.0f, 8.0f}, matWall, 0, WALL},
+        {{4.0f, 2.0f, 0}, {0.1f, 4.0f, 8.0f}, matWall, 0, WALL},
+        {{0, 2.0f, 4.0f}, {8.0f, 4.0f, 0.1f}, matWall, 0, WALL},
 
-        // Стены
-        {{0, 2.0f, -4.0f}, {8.0f, 4.0f, 0.1f}, matWall, 0, WALL},   // Задняя
-        {{-4.0f, 2.0f, 0}, {0.1f, 4.0f, 8.0f}, matWall, 0, WALL},   // Левая
-        {{4.0f, 2.0f, 0}, {0.1f, 4.0f, 8.0f}, matWall, 0, WALL},    // Правая
-        {{0, 2.0f, 4.0f}, {8.0f, 4.0f, 0.1f}, matWall, 0, WALL},    // Передняя
+        // Дверь (передняя стена)
+        {{0.0f, 1.25f, 3.92f}, {1.2f, 2.5f, 0.08f}, matWood, 0, WALL},
+        {{-0.65f, 1.25f, 3.93f}, {0.1f, 2.6f, 0.1f}, matWood, 0, WALL},
+        {{ 0.65f, 1.25f, 3.93f}, {0.1f, 2.6f, 0.1f}, matWood, 0, WALL},
+        {{ 0.0f, 2.55f, 3.93f}, {1.4f, 0.1f, 0.1f}, matWood, 0, WALL},
 
-        // Задняя стена (картины)
+        // Картины
         {{-1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
         {{-1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 1, PAINTING},
         {{1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
         {{1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 2, PAINTING},
-
-        // Левая стена
         {{-3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
         {{-3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 3, PAINTING},
         {{-3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
         {{-3.92f, 2.2f, 1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 4, PAINTING},
-
-        // Правая стена
         {{3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
         {{3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 5, PAINTING},
         {{3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
@@ -445,29 +584,15 @@ int main() {
 
         {lightPos, {0.3f, 0.1f, 0.3f}, matLamp, 0, LAMP},
 
-        // Пьедестал для статуи
-        {{0.0f, 0.15f, -3.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE}
+        // Пьедесталы
+        {{0.0f, 0.15f, -2.6f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
+        {{-2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
+        {{ 2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE}
     };
 
-    // ===== ЗОЛОТЫЕ ПАЛКИ И КРАСНАЯ ЛЕНТА =====
-    float barY = 0.6f;
-    float barHeight = 1.0f;
-    float barThickness = 0.05f;
-    float offset = 0.55f;
-
-    objects.push_back({ {-offset, barY, -3.0f - offset}, {barThickness, barHeight, barThickness}, matGold, 0, GOLD_BAR });
-    objects.push_back({ { offset, barY, -3.0f - offset}, {barThickness, barHeight, barThickness}, matGold, 0, GOLD_BAR });
-    objects.push_back({ {-offset, barY, -3.0f + offset}, {barThickness, barHeight, barThickness}, matGold, 0, GOLD_BAR });
-    objects.push_back({ { offset, barY, -3.0f + offset}, {barThickness, barHeight, barThickness}, matGold, 0, GOLD_BAR });
-
-    float ribbonY = 0.8f;
-    float ribbonThickness = 0.02f;
-    float ribbonWidth = offset * 2.0f;
-
-    objects.push_back({ {0.0f, ribbonY, -3.0f - offset}, {ribbonWidth, ribbonThickness, 0.04f}, matRibbon, 0, RED_RIBBON });
-    objects.push_back({ {0.0f, ribbonY, -3.0f + offset}, {ribbonWidth, ribbonThickness, 0.04f}, matRibbon, 0, RED_RIBBON });
-    objects.push_back({ {-offset, ribbonY, -3.0f}, {0.04f, ribbonThickness, ribbonWidth}, matRibbon, 0, RED_RIBBON });
-    objects.push_back({ { offset, ribbonY, -3.0f}, {0.04f, ribbonThickness, ribbonWidth}, matRibbon, 0, RED_RIBBON });
+    addGoldBarsAndRibbons(objects, glm::vec3(0.0f, 0.0f, -2.6f), 0.0f, matGold, matRibbon);
+    addGoldBarsAndRibbons(objects, glm::vec3(-2.9f, 0.0f, 0.0f), 90.0f, matGold, matRibbon);
+    addGoldBarsAndRibbons(objects, glm::vec3(2.9f, 0.0f, 0.0f), -90.0f, matGold, matRibbon);
 
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = glfwGetTime();
@@ -490,14 +615,36 @@ int main() {
             glDrawElements(GL_TRIANGLES, cubeIndices.size(), GL_UNSIGNED_INT, 0);
         }
 
-        if (statue && !statue->meshes.empty()) {
-            glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.3f, -3.0f));
-            model = glm::rotate(model, glm::radians(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-            model = glm::scale(model, glm::vec3(5.0f));
+        for (const auto& st : statues) {
+            if (!st.model || st.model->meshes.empty()) continue;
+            glm::mat4 model = glm::translate(glm::mat4(1.0f), st.position);
+            model = glm::rotate(model, glm::radians(st.yawDeg), glm::vec3(0.0f, 1.0f, 0.0f));
+            model = glm::scale(model, glm::vec3(st.scale));
             glUniformMatrix4fv(glGetUniformLocation(depthProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-            statue->Draw();
+            st.model->Draw();
         }
 
+        // Тень от дверной ручки
+        {
+            glm::mat4 m = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.86f));
+            m = glm::rotate(m, glm::radians(90.0f), glm::vec3(1, 0, 0));
+            m = glm::scale(m, glm::vec3(0.12f, 0.02f, 0.12f));
+            glUniformMatrix4fv(glGetUniformLocation(depthProgram, "model"), 1, GL_FALSE, glm::value_ptr(m));
+            glBindVertexArray(cylVAO);
+            glDrawElements(GL_TRIANGLES, cylinderIndices.size(), GL_UNSIGNED_INT, 0);
+
+            m = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.82f));
+            m = glm::rotate(m, glm::radians(90.0f), glm::vec3(1, 0, 0));
+            m = glm::scale(m, glm::vec3(0.04f, 0.06f, 0.04f));
+            glUniformMatrix4fv(glGetUniformLocation(depthProgram, "model"), 1, GL_FALSE, glm::value_ptr(m));
+            glDrawElements(GL_TRIANGLES, cylinderIndices.size(), GL_UNSIGNED_INT, 0);
+
+            m = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.77f));
+            m = glm::scale(m, glm::vec3(0.16f));
+            glUniformMatrix4fv(glGetUniformLocation(depthProgram, "model"), 1, GL_FALSE, glm::value_ptr(m));
+            glBindVertexArray(sphVAO);
+            glDrawElements(GL_TRIANGLES, sphereIndices.size(), GL_UNSIGNED_INT, 0);
+        }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
         // 2. Основной проход
@@ -532,27 +679,15 @@ int main() {
             glUniform1i(glGetUniformLocation(mainProgram, "isLamp"), obj.mat.isEmissive ? 1 : 0);
             glUniform1i(glGetUniformLocation(mainProgram, "useTexture"), obj.mat.useTexture ? 1 : 0);
 
-            // ВСЕГДА привязываем слот 1 к какой-то текстуре, чтобы не было «залипания»
             glActiveTexture(GL_TEXTURE1);
-            unsigned int chosenTex = floorTexture; // fallback
-            if (obj.type == FLOOR) {
-                chosenTex = floorTexture;
-            }
-            else if (obj.type == FRAME) {
-                chosenTex = woodTexture;
-            }
-            else if (obj.type == PAINTING) {
-                chosenTex = paintTex[obj.textureIndex - 1];
-            }
-            else if (obj.type == SCULPTURE) {
-                chosenTex = marbleTexture;
-            }
-            else if (obj.type == GOLD_BAR) {
-                chosenTex = goldTexture;
-            }
-            else if (obj.type == RED_RIBBON) {
-                chosenTex = ribbonTexture;
-            }
+            unsigned int chosenTex = floorTexture;
+            if (obj.type == FLOOR) chosenTex = floorTexture;
+            else if (obj.type == FRAME) chosenTex = woodTexture;
+            else if (obj.type == PAINTING) chosenTex = paintTex[obj.textureIndex - 1];
+            else if (obj.type == SCULPTURE) chosenTex = marbleTexture;
+            else if (obj.type == GOLD_BAR) chosenTex = goldTexture;
+            else if (obj.type == RED_RIBBON) chosenTex = ribbonTexture;
+
             glBindTexture(GL_TEXTURE_2D, chosenTex);
             glUniform1i(glGetUniformLocation(mainProgram, "diffuseTexture"), 1);
 
@@ -560,27 +695,62 @@ int main() {
             glDrawElements(GL_TRIANGLES, cubeIndices.size(), GL_UNSIGNED_INT, 0);
         }
 
-        // Отрисовка статуи в основном проходе
-        if (statue && !statue->meshes.empty()) {
-            glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.3f, -3.0f));
-            model = glm::rotate(model, glm::radians(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-            model = glm::scale(model, glm::vec3(5.0f));
+        // ===== ОТРИСОВКА КРУГЛОЙ ДВЕРНОЙ РУЧКИ (ТЕКСТУРА ЗОЛОТА) =====
+        glUniform3fv(glGetUniformLocation(mainProgram, "objectColor"), 1, glm::value_ptr(glm::vec3(1.0f)));
+        glUniform1f(glGetUniformLocation(mainProgram, "Ka"), 0.4f);
+        glUniform1f(glGetUniformLocation(mainProgram, "Kd"), 0.8f);
+        glUniform1f(glGetUniformLocation(mainProgram, "Ks"), 1.0f);
+        glUniform1f(glGetUniformLocation(mainProgram, "p"), 128.0f);
+        glUniform1i(glGetUniformLocation(mainProgram, "isLamp"), 0);
+        glUniform1i(glGetUniformLocation(mainProgram, "useTexture"), 1);
+        
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, goldTexture); // Текстура золота
+        glUniform1i(glGetUniformLocation(mainProgram, "diffuseTexture"), 1);
 
-            glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+        // 1. Основание (розетка)
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.86f));
+        model = glm::rotate(model, glm::radians(90.0f), glm::vec3(1, 0, 0));
+        model = glm::scale(model, glm::vec3(0.12f, 0.02f, 0.12f));
+        glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+        glBindVertexArray(cylVAO);
+        glDrawElements(GL_TRIANGLES, cylinderIndices.size(), GL_UNSIGNED_INT, 0);
 
-            glUniform3fv(glGetUniformLocation(mainProgram, "objectColor"), 1, glm::value_ptr(glm::vec3(1.0f)));
-            glUniform1f(glGetUniformLocation(mainProgram, "Ka"), 0.3f);
-            glUniform1f(glGetUniformLocation(mainProgram, "Kd"), 0.7f);
-            glUniform1f(glGetUniformLocation(mainProgram, "Ks"), 0.1f);
-            glUniform1f(glGetUniformLocation(mainProgram, "p"), 16.0f);
-            glUniform1i(glGetUniformLocation(mainProgram, "isLamp"), 0);
+        // 2. Ножка
+        model = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.82f));
+        model = glm::rotate(model, glm::radians(90.0f), glm::vec3(1, 0, 0));
+        model = glm::scale(model, glm::vec3(0.04f, 0.06f, 0.04f));
+        glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+        glDrawElements(GL_TRIANGLES, cylinderIndices.size(), GL_UNSIGNED_INT, 0);
 
-            glUniform1i(glGetUniformLocation(mainProgram, "useTexture"), 1);
+        // 3. Сама ручка (сфера)
+        model = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.77f));
+        model = glm::scale(model, glm::vec3(0.16f));
+        glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+        glBindVertexArray(sphVAO);
+        glDrawElements(GL_TRIANGLES, sphereIndices.size(), GL_UNSIGNED_INT, 0);
+
+        // Отрисовка статуй
+        glUniform3fv(glGetUniformLocation(mainProgram, "objectColor"), 1, glm::value_ptr(glm::vec3(1.0f)));
+        glUniform1f(glGetUniformLocation(mainProgram, "Ka"), 0.3f);
+        glUniform1f(glGetUniformLocation(mainProgram, "Kd"), 0.7f);
+        glUniform1f(glGetUniformLocation(mainProgram, "Ks"), 0.1f);
+        glUniform1f(glGetUniformLocation(mainProgram, "p"), 16.0f);
+        glUniform1i(glGetUniformLocation(mainProgram, "isLamp"), 0);
+        glUniform1i(glGetUniformLocation(mainProgram, "useTexture"), 1);
+
+        for (const auto& st : statues) {
+            if (!st.model || st.model->meshes.empty()) continue;
+            glm::mat4 m = glm::translate(glm::mat4(1.0f), st.position);
+            m = glm::rotate(m, glm::radians(st.yawDeg), glm::vec3(0.0f, 1.0f, 0.0f));
+            m = glm::scale(m, glm::vec3(st.scale));
+            glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE, glm::value_ptr(m));
+
             glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, catTexture);
+            glBindTexture(GL_TEXTURE_2D, st.textureID);
             glUniform1i(glGetUniformLocation(mainProgram, "diffuseTexture"), 1);
 
-            statue->Draw();
+            st.model->Draw();
         }
 
         glfwSwapBuffers(window);
