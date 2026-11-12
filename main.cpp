@@ -17,16 +17,6 @@ const unsigned int SCR_WIDTH = 1280;
 const unsigned int SCR_HEIGHT = 720;
 const unsigned int SHADOW_WIDTH = 1024, SHADOW_HEIGHT = 1024;
 
-// Настенная лампа-отрезок (по оси X, на всю ширину стены).
-const float LAMP_HALF_WIDTH = 3.7f;
-const float LAMP_Y = 3.45f;
-const float LAMP_Z = 3.78f;
-
-// Потолочная лампа — маленькая круглая, по центру потолка.
-const float CEIL_LAMP_X = 0.0f;
-const float CEIL_LAMP_Y = 3.70f;   // чуть ниже потолка (потолок на y=4.0)
-const float CEIL_LAMP_Z = 0.0f;
-
 glm::vec3 cameraPos = glm::vec3(0.0f, 1.6f, 2.5f);
 glm::vec3 cameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
 glm::vec3 cameraUp = glm::vec3(0.0f, 1.0f, 0.0f);
@@ -100,7 +90,6 @@ void main() {
     gl_Position = projection * view * vec4(FragPos, 1.0);
 })";
 
-// Настенная лампа — линейный источник; потолочная — точечный.
 const char* mainFS = R"(#version 330 core
 in vec3 FragPos; in vec3 Normal; in vec4 FragPosLightSpace; in vec2 TexCoord;
 out vec4 FragColor;
@@ -109,12 +98,8 @@ uniform sampler2D shadowMap;
 uniform sampler2D diffuseTexture;
 uniform vec3 viewPos;
 uniform vec3 objectColor;
-uniform vec3 lightColor;        // цвет настенной лампы
-uniform vec3 lightPos;          // центр настенной лампы (для теней)
-uniform vec3 lampA;             // настенная: левый конец
-uniform vec3 lampB;             // настенная: правый конец
-uniform vec3 ceilLampColor;     // цвет потолочной лампы
-uniform vec3 ceilLampPos;       // позиция потолочной лампы (точечный источник)
+uniform vec3 lightColor;
+uniform vec3 lightPos;            // потолочная лампа — общий свет, без теней
 uniform float Ka;
 uniform float Kd;
 uniform float Ks;
@@ -122,56 +107,20 @@ uniform float p;
 uniform bool isLamp;
 uniform bool useTexture;
 
-float ShadowCalculation(vec4 fragPosLightSpace) {
+// Две лампы-бра на стене с дверью — именно от них считаются тени
+uniform vec3 wallLampPos[2];
+uniform vec3 wallLampColor;
+
+// Точка, от которой рендерится shadow map (между бра)
+uniform vec3 shadowLightPos;
+
+float ShadowCalculation(vec4 fragPosLightSpace, float bias) {
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
     if (projCoords.z > 1.0) return 0.0;
     float closestDepth = texture(shadowMap, projCoords.xy).r;
     float currentDepth = projCoords.z;
-    float bias = 0.005;
     return currentDepth - bias > closestDepth ? 1.0 : 0.0;
-}
-
-// Вклад линейного источника (отрезок A..B).
-vec3 LineLight(vec3 A, vec3 B, vec3 col, vec3 N, vec3 V,
-               float Kd, float Ks, float p)
-{
-    vec3 seg = B - A;
-    float segLen2 = max(dot(seg, seg), 1e-6);
-    float t = clamp(dot(FragPos - A, seg) / segLen2, 0.0, 1.0);
-    vec3 closest = A + t * seg;
-
-    vec3 toLight = closest - FragPos;
-    float dist = length(toLight);
-    vec3 L = toLight / max(dist, 1e-4);
-
-    float diff = max(dot(N, L), 0.0);
-    vec3 R = reflect(-L, N);
-    float spec = pow(max(dot(R, V), 0.0), p);
-
-    float attenuation = 1.0 / (1.0 + 0.015 * dist + 0.0015 * (dist * dist));
-
-    float reach = 4.0;
-    float a = max(0.0, t - reach / max(length(seg), 1e-3));
-    float b = min(1.0, t + reach / max(length(seg), 1e-3));
-    float coverage = (b - a);
-    float lineBoost = 0.2 + 0.5 * coverage;
-
-    return (Kd * diff + Ks * spec) * col * attenuation * lineBoost;
-}
-
-// Вклад точечного источника.
-vec3 PointLight(vec3 pos, vec3 col, vec3 N, vec3 V,
-                float Kd, float Ks, float p)
-{
-    vec3 toLight = pos - FragPos;
-    float dist = length(toLight);
-    vec3 L = toLight / max(dist, 1e-4);
-    float diff = max(dot(N, L), 0.0);
-    vec3 R = reflect(-L, N);
-    float spec = pow(max(dot(R, V), 0.0), p);
-    float attenuation = 1.0 / (1.0 + 0.05 * dist + 0.01 * (dist * dist));
-    return (Kd * diff + Ks * spec) * col * attenuation;
 }
 
 void main() {
@@ -181,22 +130,36 @@ void main() {
     }
 
     vec3 baseColor = useTexture ? texture(diffuseTexture, TexCoord).rgb : objectColor;
+
     vec3 N = normalize(Normal);
     vec3 V = normalize(viewPos - FragPos);
 
-    // Настенная лампа — линейный источник, от неё же тени.
-    vec3 directWall = LineLight(lampA, lampB, lightColor, N, V, Kd, Ks, p);
-    float shadow = ShadowCalculation(FragPosLightSpace);
-    directWall *= (1.0 - shadow);
+    // ===== Потолочная лампа: общий свет, БЕЗ теней =====
+    vec3 ambient = Ka * lightColor;
+    vec3 L = normalize(lightPos - FragPos);
+    float diff = max(dot(N, L), 0.0);
+    vec3 R = reflect(-L, N);
+    float spec = pow(max(dot(R, V), 0.0), p);
+    float distance = length(lightPos - FragPos);
+    float attenuation = 1.0 / (1.0 + 0.05 * distance + 0.01 * (distance * distance));
+    vec3 lighting = (Kd * diff + Ks * spec) * lightColor * attenuation;
 
-    // Потолочная лампа — маленькая круглая, точечный источник.
-    vec3 directCeil = PointLight(ceilLampPos, ceilLampColor, N, V, Kd, Ks, p);
+    // ===== Бра: свет + тень =====
+    vec3 Lsh = normalize(shadowLightPos - FragPos);
+    float bias = max(0.0008 * (1.0 - dot(N, Lsh)), 0.0002);
+    float shadow = ShadowCalculation(FragPosLightSpace, bias);
 
-    // Ambient — умеренный.
-    vec3 ambient = (0.30 + Ka * 0.4) * (lightColor + ceilLampColor) * 0.5;
+    for (int i = 0; i < 2; i++) {
+        vec3 Lw = normalize(wallLampPos[i] - FragPos);
+        float diffW = max(dot(N, Lw), 0.0);
+        vec3 Rw = reflect(-Lw, N);
+        float specW = pow(max(dot(Rw, V), 0.0), p);
+        float distW = length(wallLampPos[i] - FragPos);
+        float attW = 1.0 / (1.0 + 0.10 * distW + 0.03 * (distW * distW));
+        lighting += (Kd * diffW + Ks * specW) * wallLampColor * attW * (1.0 - shadow);
+    }
 
-    vec3 finalColor = (ambient + directWall + directCeil) * baseColor;
-    finalColor = pow(max(finalColor, vec3(0.0)), vec3(0.9));
+    vec3 finalColor = (ambient + lighting) * baseColor;
     FragColor = vec4(finalColor, 1.0);
 })";
 
@@ -345,8 +308,7 @@ void setupMesh(unsigned int& VAO, unsigned int& VBO, unsigned int& EBO,
     glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, texCoord)); glEnableVertexAttribArray(2);
 }
 
-// Добавлен тип DOOR для отдельной текстуры двери.
-enum ObjectType { FLOOR, WALL, FRAME, PAINTING, LAMP, SCULPTURE, CEILING, GOLD_BAR, RED_RIBBON, DOOR };
+enum ObjectType { FLOOR, WALL, FRAME, PAINTING, LAMP, SCULPTURE, CEILING, GOLD_BAR, RED_RIBBON };
 
 struct Material { glm::vec3 color; float Ka; float Kd; float Ks; float p; bool isEmissive; bool useTexture; };
 
@@ -526,7 +488,7 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Museum (Wall + Round Ceiling Lamp)", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Museum (Wall Lamps Shadows)", nullptr, nullptr);
     glfwMakeContextCurrent(window);
     glfwSetCursorPosCallback(window, mouse_callback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
@@ -559,8 +521,6 @@ int main() {
     unsigned int marbleTexture = loadTexture("marble.jpg");
     unsigned int goldTexture = loadTexture("gold.jpg");
     unsigned int ribbonTexture = loadTexture("ribbon.jpg");
-    // Отдельная текстура для двери.
-    unsigned int doorTexture = loadTexture("door.jpg");
 
     unsigned int catTex = loadTexture("models/cat_diffuse.jpg");
     unsigned int horseTex = loadTexture("models/horse_diffuse.jpg");
@@ -597,18 +557,23 @@ int main() {
     glDrawBuffer(GL_NONE); glReadBuffer(GL_NONE);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    // Настенная лампа (для теней — её центр).
-    glm::vec3 lightPos = glm::vec3(0.0f, LAMP_Y, LAMP_Z);
-    glm::vec3 lightColor = glm::vec3(1.0f, 0.95f, 0.85f);
-    glm::vec3 lampA(-LAMP_HALF_WIDTH, LAMP_Y, LAMP_Z);
-    glm::vec3 lampB(LAMP_HALF_WIDTH, LAMP_Y, LAMP_Z);
+    // Потолочная лампа — общий свет, БЕЗ теней
+    glm::vec3 lightPos = glm::vec3(0.0f, 3.8f, 0.0f);
+    glm::vec3 lightColor = glm::vec3(1.0f, 1.0f, 1.0f);
 
-    // Потолочная лампа — точечный источник в центре.
-    glm::vec3 ceilLampColor = glm::vec3(0.95f, 0.97f, 1.0f);
-    glm::vec3 ceilLampPos(CEIL_LAMP_X, CEIL_LAMP_Y, CEIL_LAMP_Z);
+    // Две лампы-бра на стене с дверью — от них считаются тени
+    glm::vec3 wallLampPositions[2] = {
+        glm::vec3(-1.5f, 2.2f, 3.85f),
+        glm::vec3(1.5f, 2.2f, 3.85f)
+    };
+    glm::vec3 wallLampColor = glm::vec3(1.0f, 0.9f, 0.7f);
 
-    glm::mat4 lightProj = glm::ortho(-6.0f, 6.0f, -6.0f, 6.0f, 0.1f, 15.0f);
-    glm::mat4 lightView = glm::lookAt(lightPos, glm::vec3(0.0f, 1.0f, -1.0f), glm::vec3(0, 1, 0));
+    // Точка, от которой рендерится shadow map (между бра, чуть впереди стены)
+    glm::vec3 shadowLightPos = glm::vec3(0.0f, 2.2f, 3.3f);
+    glm::vec3 shadowLightTarget = glm::vec3(0.0f, 1.0f, 0.0f);
+
+    glm::mat4 lightProj = glm::ortho(-4.5f, 4.5f, -4.5f, 4.5f, 0.1f, 12.0f);
+    glm::mat4 lightView = glm::lookAt(shadowLightPos, shadowLightTarget, glm::vec3(0, 1, 0));
     glm::mat4 lightSpaceMatrix = lightProj * lightView;
 
     Material matFloor = { {0.55f, 0.27f, 0.07f}, 0.2f, 0.8f, 0.0f,  1.0f,  false, true };
@@ -616,18 +581,11 @@ int main() {
     Material matCeiling = { {0.5f, 0.5f, 0.5f},    0.2f, 0.6f, 0.1f,  8.0f,  false, false };
     Material matWood = { {1.0f, 1.0f, 1.0f},    0.2f, 0.9f, 0.0f,  1.0f,  false, true };
     Material matPaint = { {1.0f, 1.0f, 1.0f},    0.2f, 0.8f, 0.0f,  1.0f,  false, true };
+    Material matLamp = { {1.0f, 1.0f, 1.0f},    1.0f, 0.0f, 0.0f,  1.0f,  true,  false };
     Material matMarble = { {1.0f, 1.0f, 1.0f},    0.3f, 0.6f, 0.5f,  64.0f, false, true };
     Material matPedestal = { {0.85f, 0.85f, 0.85f}, 0.25f,0.7f, 0.2f,  32.0f, false, false };
     Material matGold = { {1.0f, 0.84f, 0.0f},   0.4f, 0.8f, 1.0f,  128.0f,false, true };
     Material matRibbon = { {0.8f, 0.0f, 0.0f},    0.5f, 0.5f, 0.2f,  16.0f, false, true };
-    // Материал двери (использует door.jpg).
-    Material matDoor = { {1.0f, 1.0f, 1.0f},    0.2f, 0.9f, 0.0f,  1.0f,  false, true };
-
-    // Материалы ламп
-    Material matLampBody = { {0.75f, 0.75f, 0.78f}, 0.3f, 0.7f, 0.4f, 32.0f, false, false };
-    Material matLampBulb = { {1.0f, 0.95f, 0.80f}, 1.0f, 0.0f, 0.0f,  1.0f, true,  false };
-    Material matCeilLampBody = { {0.70f, 0.70f, 0.72f}, 0.3f, 0.7f, 0.4f, 32.0f, false, false };
-    Material matCeilLampBulb = { {0.90f, 0.95f, 1.00f}, 1.0f, 0.0f, 0.0f,  1.0f, true,  false };
 
     std::vector<Object> objects = {
         {{0, -0.05f, 0}, {8.0f, 0.1f, 8.0f}, matFloor, 0, FLOOR},
@@ -637,38 +595,44 @@ int main() {
         {{4.0f, 2.0f, 0}, {0.1f, 4.0f, 8.0f}, matWall, 0, WALL},
         {{0, 2.0f, 4.0f}, {8.0f, 4.0f, 0.1f}, matWall, 0, WALL},
 
-        // ===== Дверь (передняя стена) — теперь тип DOOR и текстура door.jpg =====
-        {{0.0f, 1.25f, 3.92f}, {1.2f, 2.5f, 0.08f}, matDoor, 0, DOOR},
-        {{-0.65f, 1.25f, 3.93f}, {0.1f, 2.6f, 0.1f}, matDoor, 0, DOOR},
-        {{ 0.65f, 1.25f, 3.93f}, {0.1f, 2.6f, 0.1f}, matDoor, 0, DOOR},
-        {{ 0.0f, 2.55f, 3.93f}, {1.4f, 0.1f, 0.1f}, matDoor, 0, DOOR},
+        // Дверь (передняя стена)
+        {{0.0f, 1.25f, 3.92f}, {1.2f, 2.5f, 0.08f}, matWood, 0, WALL},
+        {{-0.65f, 1.25f, 3.93f}, {0.1f, 2.6f, 0.1f}, matWood, 0, WALL},
+        {{ 0.65f, 1.25f, 3.93f}, {0.1f, 2.6f, 0.1f}, matWood, 0, WALL},
+        {{ 0.0f, 2.55f, 3.93f}, {1.4f, 0.1f, 0.1f}, matWood, 0, WALL},
 
-        // Картины
-        {{-1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
-        {{-1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 1, PAINTING},
-        {{1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
-        {{1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 2, PAINTING},
-        {{-3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
-        {{-3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 3, PAINTING},
-        {{-3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
-        {{-3.92f, 2.2f, 1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 4, PAINTING},
-        {{3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
-        {{3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 5, PAINTING},
-        {{3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
-        {{3.92f, 2.2f, 1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 6, PAINTING},
+        // ===== Две лампы-бра на стене с дверью =====
+        {{wallLampPositions[0].x, wallLampPositions[0].y, wallLampPositions[0].z},
+         {0.35f, 0.5f, 0.15f}, matLamp, 0, LAMP},
+        {{wallLampPositions[1].x, wallLampPositions[1].y, wallLampPositions[1].z},
+         {0.35f, 0.5f, 0.15f}, matLamp, 0, LAMP},
 
-        // ===== Настенная лампа над дверью =====
-        {{0.0f, 3.55f, 3.86f}, {7.6f, 0.14f, 0.10f}, matLampBody, 0, LAMP},
-        {{0.0f, 3.43f, 3.84f}, {7.4f, 0.10f, 0.06f}, matLampBulb, 0, LAMP},
+         // Золотые кронштейны под брами
+         {{wallLampPositions[0].x, wallLampPositions[0].y - 0.30f, 3.90f},
+          {0.08f, 0.12f, 0.08f}, matGold, 0, GOLD_BAR},
+         {{wallLampPositions[1].x, wallLampPositions[1].y - 0.30f, 3.90f},
+          {0.08f, 0.12f, 0.08f}, matGold, 0, GOLD_BAR},
 
-        // ===== Потолочная лампа — маленькая круглая =====
-        {{CEIL_LAMP_X, 3.94f, CEIL_LAMP_Z}, {0.40f, 0.10f, 0.40f}, matCeilLampBody, 0, LAMP},
-        {{CEIL_LAMP_X, 3.80f, CEIL_LAMP_Z}, {0.28f, 0.28f, 0.28f}, matCeilLampBulb, 0, LAMP},
+          // Картины
+          {{-1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
+          {{-1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 1, PAINTING},
+          {{1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
+          {{1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 2, PAINTING},
+          {{-3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
+          {{-3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 3, PAINTING},
+          {{-3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
+          {{-3.92f, 2.2f, 1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 4, PAINTING},
+          {{3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
+          {{3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 5, PAINTING},
+          {{3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
+          {{3.92f, 2.2f, 1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 6, PAINTING},
 
-        // Пьедесталы
-        {{0.0f, 0.15f, -2.6f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
-        {{-2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
-        {{ 2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE}
+          {lightPos, {0.3f, 0.1f, 0.3f}, matLamp, 0, LAMP},
+
+          // Пьедесталы
+          {{0.0f, 0.15f, -2.6f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
+          {{-2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
+          {{ 2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE}
     };
 
     addGoldBarsAndRibbons(objects, glm::vec3(0.0f, 0.0f, -2.6f), 0.0f, matGold, matRibbon);
@@ -681,7 +645,7 @@ int main() {
         lastFrame = currentFrame;
         processInput(window);
 
-        // 1. Теневой проход (от настенной лампы)
+        // 1. Теневой проход — от бра-ламп
         glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
         glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
         glClear(GL_DEPTH_BUFFER_BIT);
@@ -743,10 +707,12 @@ int main() {
         glUniform3fv(glGetUniformLocation(mainProgram, "viewPos"), 1, glm::value_ptr(cameraPos));
         glUniform3fv(glGetUniformLocation(mainProgram, "lightPos"), 1, glm::value_ptr(lightPos));
         glUniform3fv(glGetUniformLocation(mainProgram, "lightColor"), 1, glm::value_ptr(lightColor));
-        glUniform3fv(glGetUniformLocation(mainProgram, "lampA"), 1, glm::value_ptr(lampA));
-        glUniform3fv(glGetUniformLocation(mainProgram, "lampB"), 1, glm::value_ptr(lampB));
-        glUniform3fv(glGetUniformLocation(mainProgram, "ceilLampColor"), 1, glm::value_ptr(ceilLampColor));
-        glUniform3fv(glGetUniformLocation(mainProgram, "ceilLampPos"), 1, glm::value_ptr(ceilLampPos));
+        glUniform3fv(glGetUniformLocation(mainProgram, "shadowLightPos"), 1, glm::value_ptr(shadowLightPos));
+
+        glUniform3fv(glGetUniformLocation(mainProgram, "wallLampPos"), 2,
+            glm::value_ptr(wallLampPositions[0]));
+        glUniform3fv(glGetUniformLocation(mainProgram, "wallLampColor"), 1,
+            glm::value_ptr(wallLampColor));
 
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, depthMap);
@@ -768,7 +734,6 @@ int main() {
             unsigned int chosenTex = floorTexture;
             if (obj.type == FLOOR) chosenTex = floorTexture;
             else if (obj.type == FRAME) chosenTex = woodTexture;
-            else if (obj.type == DOOR) chosenTex = doorTexture;          // <-- дверь теперь получает door.jpg
             else if (obj.type == PAINTING) chosenTex = paintTex[obj.textureIndex - 1];
             else if (obj.type == SCULPTURE) chosenTex = marbleTexture;
             else if (obj.type == GOLD_BAR) chosenTex = goldTexture;
@@ -781,7 +746,7 @@ int main() {
             glDrawElements(GL_TRIANGLES, cubeIndices.size(), GL_UNSIGNED_INT, 0);
         }
 
-        // ===== ОТРИСОВКА КРУГЛОЙ ДВЕРНОЙ РУЧКИ (ТЕКСТУРА ЗОЛОТА) =====
+        // ===== ДВЕРНАЯ РУЧКА =====
         glUniform3fv(glGetUniformLocation(mainProgram, "objectColor"), 1, glm::value_ptr(glm::vec3(1.0f)));
         glUniform1f(glGetUniformLocation(mainProgram, "Ka"), 0.4f);
         glUniform1f(glGetUniformLocation(mainProgram, "Kd"), 0.8f);
@@ -794,7 +759,6 @@ int main() {
         glBindTexture(GL_TEXTURE_2D, goldTexture);
         glUniform1i(glGetUniformLocation(mainProgram, "diffuseTexture"), 1);
 
-        // 1. Основание (розетка)
         glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.86f));
         model = glm::rotate(model, glm::radians(90.0f), glm::vec3(1, 0, 0));
         model = glm::scale(model, glm::vec3(0.12f, 0.02f, 0.12f));
@@ -802,19 +766,37 @@ int main() {
         glBindVertexArray(cylVAO);
         glDrawElements(GL_TRIANGLES, cylinderIndices.size(), GL_UNSIGNED_INT, 0);
 
-        // 2. Ножка
         model = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.82f));
         model = glm::rotate(model, glm::radians(90.0f), glm::vec3(1, 0, 0));
         model = glm::scale(model, glm::vec3(0.04f, 0.06f, 0.04f));
         glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
         glDrawElements(GL_TRIANGLES, cylinderIndices.size(), GL_UNSIGNED_INT, 0);
 
-        // 3. Сама ручка (сфера)
         model = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.77f));
         model = glm::scale(model, glm::vec3(0.16f));
         glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
         glBindVertexArray(sphVAO);
         glDrawElements(GL_TRIANGLES, sphereIndices.size(), GL_UNSIGNED_INT, 0);
+
+        // ===== СВЕТЯЩИЕСЯ ПЛАФОНЫ БРА =====
+        glUniform3fv(glGetUniformLocation(mainProgram, "objectColor"), 1, glm::value_ptr(glm::vec3(1.0f)));
+        glUniform1f(glGetUniformLocation(mainProgram, "Ka"), 1.0f);
+        glUniform1f(glGetUniformLocation(mainProgram, "Kd"), 0.0f);
+        glUniform1f(glGetUniformLocation(mainProgram, "Ks"), 0.0f);
+        glUniform1f(glGetUniformLocation(mainProgram, "p"), 1.0f);
+        glUniform1i(glGetUniformLocation(mainProgram, "isLamp"), 1);
+        glUniform1i(glGetUniformLocation(mainProgram, "useTexture"), 0);
+
+        glBindVertexArray(sphVAO);
+        for (int i = 0; i < 2; i++) {
+            glm::mat4 lampModel = glm::translate(glm::mat4(1.0f),
+                wallLampPositions[i] + glm::vec3(0.0f, 0.05f, -0.12f));
+            lampModel = glm::scale(lampModel, glm::vec3(0.28f));
+            glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE,
+                glm::value_ptr(lampModel));
+            glDrawElements(GL_TRIANGLES, sphereIndices.size(), GL_UNSIGNED_INT, 0);
+        }
+        glUniform1i(glGetUniformLocation(mainProgram, "isLamp"), 0);
 
         // Отрисовка статуй
         glUniform3fv(glGetUniformLocation(mainProgram, "objectColor"), 1, glm::value_ptr(glm::vec3(1.0f)));
