@@ -15,7 +15,7 @@
 
 const unsigned int SCR_WIDTH = 1280;
 const unsigned int SCR_HEIGHT = 720;
-const unsigned int SHADOW_WIDTH = 1024, SHADOW_HEIGHT = 1024;
+const unsigned int SHADOW_WIDTH = 2048, SHADOW_HEIGHT = 2048;
 
 glm::vec3 cameraPos = glm::vec3(0.0f, 1.6f, 2.5f);
 glm::vec3 cameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
@@ -24,6 +24,10 @@ float yaw = -90.0f, pitch = 0.0f;
 bool firstMouse = true;
 float lastX = SCR_WIDTH / 2.0f, lastY = SCR_HEIGHT / 2.0f;
 float deltaTime = 0.0f, lastFrame = 0.0f;
+
+// Дверь по центру передней стены, потолочная лампа над центром комнаты
+const glm::vec3 DOOR_POS       = glm::vec3(0.0f, 1.25f, 3.92f);
+const glm::vec3 CEILING_LAMP_POS = glm::vec3(0.0f, 3.8f, 0.0f);
 
 void mouse_callback(GLFWwindow* window, double xposIn, double yposIn) {
     float xpos = static_cast<float>(xposIn), ypos = static_cast<float>(yposIn);
@@ -80,8 +84,14 @@ const char* mainVS = R"(#version 330 core
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aNormal;
 layout (location = 2) in vec2 aTexCoord;
-uniform mat4 model; uniform mat4 view; uniform mat4 projection; uniform mat4 lightSpaceMatrix;
-out vec3 FragPos; out vec3 Normal; out vec4 FragPosLightSpace; out vec2 TexCoord;
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 projection;
+uniform mat4 lightSpaceMatrix;
+out vec3 FragPos;
+out vec3 Normal;
+out vec4 FragPosLightSpace;
+out vec2 TexCoord;
 void main() {
     FragPos = vec3(model * vec4(aPos, 1.0));
     Normal = mat3(transpose(inverse(model))) * aNormal;
@@ -91,7 +101,10 @@ void main() {
 })";
 
 const char* mainFS = R"(#version 330 core
-in vec3 FragPos; in vec3 Normal; in vec4 FragPosLightSpace; in vec2 TexCoord;
+in vec3 FragPos;
+in vec3 Normal;
+in vec4 FragPosLightSpace;
+in vec2 TexCoord;
 out vec4 FragColor;
 
 uniform sampler2D shadowMap;
@@ -99,7 +112,7 @@ uniform sampler2D diffuseTexture;
 uniform vec3 viewPos;
 uniform vec3 objectColor;
 uniform vec3 lightColor;
-uniform vec3 lightPos;            // потолочная лампа — общий свет, без теней
+uniform vec3 lightPos;      // потолочная лампа
 uniform float Ka;
 uniform float Kd;
 uniform float Ks;
@@ -107,20 +120,24 @@ uniform float p;
 uniform bool isLamp;
 uniform bool useTexture;
 
-// Две лампы-бра на стене с дверью — именно от них считаются тени
-uniform vec3 wallLampPos[2];
-uniform vec3 wallLampColor;
-
-// Точка, от которой рендерится shadow map (между бра)
-uniform vec3 shadowLightPos;
-
+// PCF 3x3
 float ShadowCalculation(vec4 fragPosLightSpace, float bias) {
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
-    if (projCoords.z > 1.0) return 0.0;
-    float closestDepth = texture(shadowMap, projCoords.xy).r;
-    float currentDepth = projCoords.z;
-    return currentDepth - bias > closestDepth ? 1.0 : 0.0;
+    if (projCoords.z > 1.0 || projCoords.z < 0.0 ||
+        projCoords.x < 0.0 || projCoords.x > 1.0 ||
+        projCoords.y < 0.0 || projCoords.y > 1.0) return 0.0;
+
+    float shadow = 0.0;
+    vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0));
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            float closestDepth = texture(shadowMap, projCoords.xy + vec2(x, y) * texelSize).r;
+            float currentDepth = projCoords.z;
+            shadow += (currentDepth - bias > closestDepth) ? 1.0 : 0.0;
+        }
+    }
+    return shadow / 9.0;
 }
 
 void main() {
@@ -134,7 +151,7 @@ void main() {
     vec3 N = normalize(Normal);
     vec3 V = normalize(viewPos - FragPos);
 
-    // ===== Потолочная лампа: общий свет, БЕЗ теней =====
+    // ===== Потолочная лампа: свет + тень =====
     vec3 ambient = Ka * lightColor;
     vec3 L = normalize(lightPos - FragPos);
     float diff = max(dot(N, L), 0.0);
@@ -142,22 +159,11 @@ void main() {
     float spec = pow(max(dot(R, V), 0.0), p);
     float distance = length(lightPos - FragPos);
     float attenuation = 1.0 / (1.0 + 0.05 * distance + 0.01 * (distance * distance));
-    vec3 lighting = (Kd * diff + Ks * spec) * lightColor * attenuation;
 
-    // ===== Бра: свет + тень =====
-    vec3 Lsh = normalize(shadowLightPos - FragPos);
-    float bias = max(0.0008 * (1.0 - dot(N, Lsh)), 0.0002);
+    float bias = max(0.0020 * (1.0 - dot(N, L)), 0.0007);
     float shadow = ShadowCalculation(FragPosLightSpace, bias);
 
-    for (int i = 0; i < 2; i++) {
-        vec3 Lw = normalize(wallLampPos[i] - FragPos);
-        float diffW = max(dot(N, Lw), 0.0);
-        vec3 Rw = reflect(-Lw, N);
-        float specW = pow(max(dot(Rw, V), 0.0), p);
-        float distW = length(wallLampPos[i] - FragPos);
-        float attW = 1.0 / (1.0 + 0.10 * distW + 0.03 * (distW * distW));
-        lighting += (Kd * diffW + Ks * specW) * wallLampColor * attW * (1.0 - shadow);
-    }
+    vec3 lighting = (Kd * diff + Ks * spec) * lightColor * attenuation * (1.0 - shadow);
 
     vec3 finalColor = (ambient + lighting) * baseColor;
     FragColor = vec4(finalColor, 1.0);
@@ -173,22 +179,37 @@ unsigned int compileShader(GLenum type, const char* source) {
         char info[1024];
         glGetShaderInfoLog(s, 1024, nullptr, info);
         std::cout << "SHADER COMPILE ERROR (type " << type << "):\n" << info << std::endl;
+        glDeleteShader(s);
+        return 0;
     }
     return s;
 }
 
 unsigned int createProgram(const char* vs, const char* fs) {
+    unsigned int vsId = compileShader(GL_VERTEX_SHADER, vs);
+    unsigned int fsId = compileShader(GL_FRAGMENT_SHADER, fs);
+    if (vsId == 0 || fsId == 0) {
+        std::cout << "PROGRAM CREATION FAILED: shader compilation error" << std::endl;
+        return 0;
+    }
+
     unsigned int p = glCreateProgram();
-    glAttachShader(p, compileShader(GL_VERTEX_SHADER, vs));
-    glAttachShader(p, compileShader(GL_FRAGMENT_SHADER, fs));
+    glAttachShader(p, vsId);
+    glAttachShader(p, fsId);
     glLinkProgram(p);
+
     int success;
     glGetProgramiv(p, GL_LINK_STATUS, &success);
     if (!success) {
         char info[1024];
         glGetProgramInfoLog(p, 1024, nullptr, info);
         std::cout << "PROGRAM LINK ERROR:\n" << info << std::endl;
+        glDeleteProgram(p);
+        p = 0;
     }
+
+    glDeleteShader(vsId);
+    glDeleteShader(fsId);
     return p;
 }
 
@@ -376,31 +397,52 @@ public:
 private:
     void loadModel(const std::string& path) {
         Assimp::Importer importer;
-        const aiScene* scene = importer.ReadFile(path, aiProcess_Triangulate | aiProcess_FlipUVs | aiProcess_GenNormals);
+        const aiScene* scene = importer.ReadFile(path,
+            aiProcess_Triangulate | aiProcess_FlipUVs | aiProcess_GenNormals);
 
-        if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
+        if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !scene->mRootNode) {
             std::cout << "ERROR::ASSIMP:: " << importer.GetErrorString() << " (path: " << path << ")" << std::endl;
             return;
         }
-        processNode(scene->mRootNode, scene);
+        processNode(scene->mRootNode, scene, glm::mat4(1.0f));
     }
 
-    void processNode(aiNode* node, const aiScene* scene) {
+    static glm::mat4 aiMatrix4x4ToGlm(const aiMatrix4x4& m) {
+        glm::mat4 r;
+        r[0][0] = m.a1; r[1][0] = m.a2; r[2][0] = m.a3; r[3][0] = m.a4;
+        r[0][1] = m.b1; r[1][1] = m.b2; r[2][1] = m.b3; r[3][1] = m.b4;
+        r[0][2] = m.c1; r[1][2] = m.c2; r[2][2] = m.c3; r[3][2] = m.c4;
+        r[0][3] = m.d1; r[1][3] = m.d2; r[2][3] = m.d3; r[3][3] = m.d4;
+        return r;
+    }
+
+    void processNode(aiNode* node, const aiScene* scene, const glm::mat4& parentTransform) {
+        glm::mat4 local = aiMatrix4x4ToGlm(node->mTransformation);
+        glm::mat4 global = parentTransform * local;
+
         for (unsigned int i = 0; i < node->mNumMeshes; i++) {
             aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
-            meshes.push_back(processMesh(mesh, scene));
+            meshes.push_back(processMesh(mesh, scene, global));
         }
         for (unsigned int i = 0; i < node->mNumChildren; i++) {
-            processNode(node->mChildren[i], scene);
+            processNode(node->mChildren[i], scene, global);
         }
     }
 
-    MeshData processMesh(aiMesh* mesh, const aiScene* scene) {
+    MeshData processMesh(aiMesh* mesh, const aiScene* scene, const glm::mat4& transform) {
         MeshData md;
+        glm::mat3 normalMat = glm::transpose(glm::inverse(glm::mat3(transform)));
+
         for (unsigned int i = 0; i < mesh->mNumVertices; i++) {
             Vertex v;
-            v.pos = glm::vec3(mesh->mVertices[i].x, mesh->mVertices[i].y, mesh->mVertices[i].z);
-            v.normal = glm::vec3(mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z);
+            glm::vec4 p(mesh->mVertices[i].x, mesh->mVertices[i].y,
+                mesh->mVertices[i].z, 1.0f);
+            p = transform * p;
+            v.pos = glm::vec3(p);
+
+            glm::vec3 n(mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z);
+            v.normal = glm::normalize(normalMat * n);
+
             if (mesh->mTextureCoords[0]) {
                 v.texCoord = glm::vec2(mesh->mTextureCoords[0][i].x, mesh->mTextureCoords[0][i].y);
             }
@@ -484,15 +526,29 @@ struct StatueTransform {
 };
 
 int main() {
-    glfwInit();
+    if (!glfwInit()) {
+        std::cout << "Failed to initialize GLFW" << std::endl;
+        return -1;
+    }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Museum (Wall Lamps Shadows)", nullptr, nullptr);
+
+    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Museum (Ceiling Lamp Only)", nullptr, nullptr);
+    if (!window) {
+        std::cout << "Failed to create GLFW window" << std::endl;
+        glfwTerminate();
+        return -1;
+    }
     glfwMakeContextCurrent(window);
     glfwSetCursorPosCallback(window, mouse_callback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
+
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        std::cout << "Failed to initialize GLAD" << std::endl;
+        glfwTerminate();
+        return -1;
+    }
     glEnable(GL_DEPTH_TEST);
 
     buildCube();
@@ -515,6 +571,12 @@ int main() {
 
     unsigned int depthProgram = createProgram(depthVS, depthFS);
     unsigned int mainProgram = createProgram(mainVS, mainFS);
+
+    if (depthProgram == 0 || mainProgram == 0) {
+        std::cout << "Critical: failed to create shader programs. Exiting." << std::endl;
+        glfwTerminate();
+        return -1;
+    }
 
     unsigned int woodTexture = loadTexture("wood.jpg");
     unsigned int floorTexture = loadTexture("floor.jpg");
@@ -542,39 +604,38 @@ int main() {
         { catModel,   glm::vec3(2.9f, 0.30f,  0.0f), -90.0f, 5.0f, catTex }
     };
 
+    // ===== ОДНА КАРТА ТЕНЕЙ — от потолочной лампы =====
     unsigned int depthMapFBO, depthMap;
-    glGenFramebuffers(1, &depthMapFBO); glGenTextures(1, &depthMap);
+    glGenFramebuffers(1, &depthMapFBO);
+    glGenTextures(1, &depthMap);
     glBindTexture(GL_TEXTURE_2D, depthMap);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, SHADOW_WIDTH, SHADOW_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, SHADOW_WIDTH, SHADOW_HEIGHT,
+        0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
     float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
     glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+
     glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthMap, 0);
     glDrawBuffer(GL_NONE); glReadBuffer(GL_NONE);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        std::cout << "SHADOW FBO ERROR: 0x" << std::hex << status << std::dec << std::endl;
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    // Потолочная лампа — общий свет, БЕЗ теней
-    glm::vec3 lightPos = glm::vec3(0.0f, 3.8f, 0.0f);
+    glm::vec3 lightPos = CEILING_LAMP_POS;
     glm::vec3 lightColor = glm::vec3(1.0f, 1.0f, 1.0f);
 
-    // Две лампы-бра на стене с дверью — от них считаются тени
-    glm::vec3 wallLampPositions[2] = {
-        glm::vec3(-1.5f, 2.2f, 3.85f),
-        glm::vec3(1.5f, 2.2f, 3.85f)
-    };
-    glm::vec3 wallLampColor = glm::vec3(1.0f, 0.9f, 0.7f);
-
-    // Точка, от которой рендерится shadow map (между бра, чуть впереди стены)
-    glm::vec3 shadowLightPos = glm::vec3(0.0f, 2.2f, 3.3f);
-    glm::vec3 shadowLightTarget = glm::vec3(0.0f, 1.0f, 0.0f);
-
-    glm::mat4 lightProj = glm::ortho(-4.5f, 4.5f, -4.5f, 4.5f, 0.1f, 12.0f);
-    glm::mat4 lightView = glm::lookAt(shadowLightPos, shadowLightTarget, glm::vec3(0, 1, 0));
-    glm::mat4 lightSpaceMatrix = lightProj * lightView;
+    // ===== Матрица для потолочной лампы — смотрит вниз =====
+    glm::vec3 ceilingLightTarget = glm::vec3(0.0f, 0.0f, 0.0f);
+    glm::mat4 ceilingLightProj = glm::ortho(-4.5f, 4.5f, -4.5f, 4.5f, 0.1f, 8.0f);
+    glm::mat4 ceilingLightView = glm::lookAt(lightPos, ceilingLightTarget, glm::vec3(0, 0, -1));
+    glm::mat4 lightSpaceMatrix = ceilingLightProj * ceilingLightView;
 
     Material matFloor = { {0.55f, 0.27f, 0.07f}, 0.2f, 0.8f, 0.0f,  1.0f,  false, true };
     Material matWall = { {0.9f, 0.9f, 0.9f},    0.2f, 0.8f, 0.0f,  1.0f,  false, false };
@@ -595,44 +656,34 @@ int main() {
         {{4.0f, 2.0f, 0}, {0.1f, 4.0f, 8.0f}, matWall, 0, WALL},
         {{0, 2.0f, 4.0f}, {8.0f, 4.0f, 0.1f}, matWall, 0, WALL},
 
-        // Дверь (передняя стена)
-        {{0.0f, 1.25f, 3.92f}, {1.2f, 2.5f, 0.08f}, matWood, 0, WALL},
-        {{-0.65f, 1.25f, 3.93f}, {0.1f, 2.6f, 0.1f}, matWood, 0, WALL},
-        {{ 0.65f, 1.25f, 3.93f}, {0.1f, 2.6f, 0.1f}, matWood, 0, WALL},
-        {{ 0.0f, 2.55f, 3.93f}, {1.4f, 0.1f, 0.1f}, matWood, 0, WALL},
+        // Дверь по центру передней стены
+        {{DOOR_POS.x, DOOR_POS.y, DOOR_POS.z}, {1.2f, 2.5f, 0.08f}, matWood, 0, WALL},
+        {{DOOR_POS.x - 0.65f, DOOR_POS.y, DOOR_POS.z + 0.01f}, {0.1f, 2.6f, 0.1f}, matWood, 0, WALL},
+        {{DOOR_POS.x + 0.65f, DOOR_POS.y, DOOR_POS.z + 0.01f}, {0.1f, 2.6f, 0.1f}, matWood, 0, WALL},
+        {{DOOR_POS.x,         DOOR_POS.y + 1.30f, DOOR_POS.z + 0.01f}, {1.4f, 0.1f, 0.1f}, matWood, 0, WALL},
 
-        // ===== Две лампы-бра на стене с дверью =====
-        {{wallLampPositions[0].x, wallLampPositions[0].y, wallLampPositions[0].z},
-         {0.35f, 0.5f, 0.15f}, matLamp, 0, LAMP},
-        {{wallLampPositions[1].x, wallLampPositions[1].y, wallLampPositions[1].z},
-         {0.35f, 0.5f, 0.15f}, matLamp, 0, LAMP},
+        // Картины на задней стене
+        {{-1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
+        {{-1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 1, PAINTING},
+        {{1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
+        {{1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 2, PAINTING},
 
-         // Золотые кронштейны под брами
-         {{wallLampPositions[0].x, wallLampPositions[0].y - 0.30f, 3.90f},
-          {0.08f, 0.12f, 0.08f}, matGold, 0, GOLD_BAR},
-         {{wallLampPositions[1].x, wallLampPositions[1].y - 0.30f, 3.90f},
-          {0.08f, 0.12f, 0.08f}, matGold, 0, GOLD_BAR},
+        // Картины на боковых стенах
+        {{-3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
+        {{-3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 3, PAINTING},
+        {{-3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
+        {{-3.92f, 2.2f, 1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 4, PAINTING},
+        {{3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
+        {{3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 5, PAINTING},
+        {{3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
+        {{3.92f, 2.2f, 1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 6, PAINTING},
 
-          // Картины
-          {{-1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
-          {{-1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 1, PAINTING},
-          {{1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
-          {{1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 2, PAINTING},
-          {{-3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
-          {{-3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 3, PAINTING},
-          {{-3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
-          {{-3.92f, 2.2f, 1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 4, PAINTING},
-          {{3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
-          {{3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 5, PAINTING},
-          {{3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
-          {{3.92f, 2.2f, 1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 6, PAINTING},
+        {lightPos, {0.3f, 0.1f, 0.3f}, matLamp, 0, LAMP},
 
-          {lightPos, {0.3f, 0.1f, 0.3f}, matLamp, 0, LAMP},
-
-          // Пьедесталы
-          {{0.0f, 0.15f, -2.6f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
-          {{-2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
-          {{ 2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE}
+        // Пьедесталы
+        {{0.0f, 0.15f, -2.6f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
+        {{-2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
+        {{ 2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE}
     };
 
     addGoldBarsAndRibbons(objects, glm::vec3(0.0f, 0.0f, -2.6f), 0.0f, matGold, matRibbon);
@@ -645,12 +696,15 @@ int main() {
         lastFrame = currentFrame;
         processInput(window);
 
-        // 1. Теневой проход — от бра-ламп
+        // ===== 1. ТЕНЕВОЙ ПРОХОД: одна карта от потолочной лампы =====
         glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
         glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
         glClear(GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(2.0f, 4.0f);
         glUseProgram(depthProgram);
-        glUniformMatrix4fv(glGetUniformLocation(depthProgram, "lightSpaceMatrix"), 1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
+        glUniformMatrix4fv(glGetUniformLocation(depthProgram, "lightSpaceMatrix"),
+            1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
 
         for (auto& obj : objects) {
             if (obj.mat.isEmissive) continue;
@@ -669,30 +723,34 @@ int main() {
             st.model->Draw();
         }
 
-        // Тень от дверной ручки
+        // Дверная ручка
         {
-            glm::mat4 m = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.86f));
+            float handleX = DOOR_POS.x + 0.45f;
+            float handleY = DOOR_POS.y - 0.05f;
+
+            glm::mat4 m = glm::translate(glm::mat4(1.0f), glm::vec3(handleX, handleY, 3.86f));
             m = glm::rotate(m, glm::radians(90.0f), glm::vec3(1, 0, 0));
             m = glm::scale(m, glm::vec3(0.12f, 0.02f, 0.12f));
             glUniformMatrix4fv(glGetUniformLocation(depthProgram, "model"), 1, GL_FALSE, glm::value_ptr(m));
             glBindVertexArray(cylVAO);
             glDrawElements(GL_TRIANGLES, cylinderIndices.size(), GL_UNSIGNED_INT, 0);
 
-            m = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.82f));
+            m = glm::translate(glm::mat4(1.0f), glm::vec3(handleX, handleY, 3.82f));
             m = glm::rotate(m, glm::radians(90.0f), glm::vec3(1, 0, 0));
             m = glm::scale(m, glm::vec3(0.04f, 0.06f, 0.04f));
             glUniformMatrix4fv(glGetUniformLocation(depthProgram, "model"), 1, GL_FALSE, glm::value_ptr(m));
             glDrawElements(GL_TRIANGLES, cylinderIndices.size(), GL_UNSIGNED_INT, 0);
 
-            m = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.77f));
+            m = glm::translate(glm::mat4(1.0f), glm::vec3(handleX, handleY, 3.77f));
             m = glm::scale(m, glm::vec3(0.16f));
             glUniformMatrix4fv(glGetUniformLocation(depthProgram, "model"), 1, GL_FALSE, glm::value_ptr(m));
             glBindVertexArray(sphVAO);
             glDrawElements(GL_TRIANGLES, sphereIndices.size(), GL_UNSIGNED_INT, 0);
         }
+        glDisable(GL_POLYGON_OFFSET_FILL);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-        // 2. Основной проход
+        // ===== 2. ОСНОВНОЙ ПРОХОД =====
         glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -704,16 +762,12 @@ int main() {
         glUniformMatrix4fv(glGetUniformLocation(mainProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
         glUniformMatrix4fv(glGetUniformLocation(mainProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
         glUniformMatrix4fv(glGetUniformLocation(mainProgram, "lightSpaceMatrix"), 1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
+
         glUniform3fv(glGetUniformLocation(mainProgram, "viewPos"), 1, glm::value_ptr(cameraPos));
         glUniform3fv(glGetUniformLocation(mainProgram, "lightPos"), 1, glm::value_ptr(lightPos));
         glUniform3fv(glGetUniformLocation(mainProgram, "lightColor"), 1, glm::value_ptr(lightColor));
-        glUniform3fv(glGetUniformLocation(mainProgram, "shadowLightPos"), 1, glm::value_ptr(shadowLightPos));
 
-        glUniform3fv(glGetUniformLocation(mainProgram, "wallLampPos"), 2,
-            glm::value_ptr(wallLampPositions[0]));
-        glUniform3fv(glGetUniformLocation(mainProgram, "wallLampColor"), 1,
-            glm::value_ptr(wallLampColor));
-
+        // Карта теней -> юнит 0, диффузная текстура -> юнит 1
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, depthMap);
         glUniform1i(glGetUniformLocation(mainProgram, "shadowMap"), 0);
@@ -759,26 +813,31 @@ int main() {
         glBindTexture(GL_TEXTURE_2D, goldTexture);
         glUniform1i(glGetUniformLocation(mainProgram, "diffuseTexture"), 1);
 
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.86f));
-        model = glm::rotate(model, glm::radians(90.0f), glm::vec3(1, 0, 0));
-        model = glm::scale(model, glm::vec3(0.12f, 0.02f, 0.12f));
-        glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-        glBindVertexArray(cylVAO);
-        glDrawElements(GL_TRIANGLES, cylinderIndices.size(), GL_UNSIGNED_INT, 0);
+        {
+            float handleX = DOOR_POS.x + 0.45f;
+            float handleY = DOOR_POS.y - 0.05f;
 
-        model = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.82f));
-        model = glm::rotate(model, glm::radians(90.0f), glm::vec3(1, 0, 0));
-        model = glm::scale(model, glm::vec3(0.04f, 0.06f, 0.04f));
-        glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-        glDrawElements(GL_TRIANGLES, cylinderIndices.size(), GL_UNSIGNED_INT, 0);
+            glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(handleX, handleY, 3.86f));
+            model = glm::rotate(model, glm::radians(90.0f), glm::vec3(1, 0, 0));
+            model = glm::scale(model, glm::vec3(0.12f, 0.02f, 0.12f));
+            glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+            glBindVertexArray(cylVAO);
+            glDrawElements(GL_TRIANGLES, cylinderIndices.size(), GL_UNSIGNED_INT, 0);
 
-        model = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 1.2f, 3.77f));
-        model = glm::scale(model, glm::vec3(0.16f));
-        glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-        glBindVertexArray(sphVAO);
-        glDrawElements(GL_TRIANGLES, sphereIndices.size(), GL_UNSIGNED_INT, 0);
+            model = glm::translate(glm::mat4(1.0f), glm::vec3(handleX, handleY, 3.82f));
+            model = glm::rotate(model, glm::radians(90.0f), glm::vec3(1, 0, 0));
+            model = glm::scale(model, glm::vec3(0.04f, 0.06f, 0.04f));
+            glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+            glDrawElements(GL_TRIANGLES, cylinderIndices.size(), GL_UNSIGNED_INT, 0);
 
-        // ===== СВЕТЯЩИЕСЯ ПЛАФОНЫ БРА =====
+            model = glm::translate(glm::mat4(1.0f), glm::vec3(handleX, handleY, 3.77f));
+            model = glm::scale(model, glm::vec3(0.16f));
+            glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+            glBindVertexArray(sphVAO);
+            glDrawElements(GL_TRIANGLES, sphereIndices.size(), GL_UNSIGNED_INT, 0);
+        }
+
+        // ===== СВЕТЯЩИЙСЯ ПЛАФОН ПОТОЛОЧНОЙ ЛАМПЫ =====
         glUniform3fv(glGetUniformLocation(mainProgram, "objectColor"), 1, glm::value_ptr(glm::vec3(1.0f)));
         glUniform1f(glGetUniformLocation(mainProgram, "Ka"), 1.0f);
         glUniform1f(glGetUniformLocation(mainProgram, "Kd"), 0.0f);
@@ -788,17 +847,16 @@ int main() {
         glUniform1i(glGetUniformLocation(mainProgram, "useTexture"), 0);
 
         glBindVertexArray(sphVAO);
-        for (int i = 0; i < 2; i++) {
-            glm::mat4 lampModel = glm::translate(glm::mat4(1.0f),
-                wallLampPositions[i] + glm::vec3(0.0f, 0.05f, -0.12f));
-            lampModel = glm::scale(lampModel, glm::vec3(0.28f));
+        {
+            glm::mat4 lampModel = glm::translate(glm::mat4(1.0f), lightPos);
+            lampModel = glm::scale(lampModel, glm::vec3(0.4f));
             glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE,
                 glm::value_ptr(lampModel));
             glDrawElements(GL_TRIANGLES, sphereIndices.size(), GL_UNSIGNED_INT, 0);
         }
         glUniform1i(glGetUniformLocation(mainProgram, "isLamp"), 0);
 
-        // Отрисовка статуй
+        // ===== СТАТУИ =====
         glUniform3fv(glGetUniformLocation(mainProgram, "objectColor"), 1, glm::value_ptr(glm::vec3(1.0f)));
         glUniform1f(glGetUniformLocation(mainProgram, "Ka"), 0.3f);
         glUniform1f(glGetUniformLocation(mainProgram, "Kd"), 0.7f);
@@ -824,6 +882,11 @@ int main() {
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
+
+    delete catModel;
+    delete horseModel;
+    delete lionModel;
+
     glfwTerminate();
     return 0;
 }
