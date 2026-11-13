@@ -13,8 +13,10 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+// размеры окна
 const unsigned int SCR_WIDTH = 1280;
 const unsigned int SCR_HEIGHT = 720;
+// карта теней
 const unsigned int SHADOW_WIDTH = 2048, SHADOW_HEIGHT = 2048;
 
 glm::vec3 cameraPos = glm::vec3(0.0f, 1.6f, 2.5f);
@@ -25,10 +27,12 @@ bool firstMouse = true;
 float lastX = SCR_WIDTH / 2.0f, lastY = SCR_HEIGHT / 2.0f;
 float deltaTime = 0.0f, lastFrame = 0.0f;
 
-// Дверь по центру передней стены, потолочная лампа над центром комнаты
-const glm::vec3 DOOR_POS       = glm::vec3(0.0f, 1.25f, 3.92f);
-const glm::vec3 CEILING_LAMP_POS = glm::vec3(0.0f, 3.8f, 0.0f);
+// Дверь по центру передней стены, две одинаковые бра симметрично по бокам
+const glm::vec3 DOOR_POS = glm::vec3(0.0f, 1.25f, 3.92f);
+const glm::vec3 WALL_LAMP_POS = glm::vec3(-1.6f, 2.2f, 3.85f);
+const glm::vec3 WALL_LAMP2_POS = glm::vec3(1.6f, 2.2f, 3.85f);
 
+// превращение движения мыши в поворот камеры
 void mouse_callback(GLFWwindow* window, double xposIn, double yposIn) {
     float xpos = static_cast<float>(xposIn), ypos = static_cast<float>(yposIn);
     if (firstMouse) { lastX = xpos; lastY = ypos; firstMouse = false; }
@@ -111,14 +115,18 @@ uniform sampler2D shadowMap;
 uniform sampler2D diffuseTexture;
 uniform vec3 viewPos;
 uniform vec3 objectColor;
-uniform vec3 lightColor;
-uniform vec3 lightPos;      // потолочная лампа
+uniform vec3 lightColor;      // потолочная лампа — общий свет, без теней
+uniform vec3 lightPos;
 uniform float Ka;
 uniform float Kd;
 uniform float Ks;
 uniform float p;
 uniform bool isLamp;
 uniform bool useTexture;
+
+// Две одинаковые бра на передней стене
+uniform vec3 wallLampPos[2];
+uniform vec3 wallLampColor;
 
 // PCF 3x3
 float ShadowCalculation(vec4 fragPosLightSpace, float bias) {
@@ -151,7 +159,7 @@ void main() {
     vec3 N = normalize(Normal);
     vec3 V = normalize(viewPos - FragPos);
 
-    // ===== Потолочная лампа: свет + тень =====
+    // ===== Потолочная лампа: общий свет, БЕЗ теней =====
     vec3 ambient = Ka * lightColor;
     vec3 L = normalize(lightPos - FragPos);
     float diff = max(dot(N, L), 0.0);
@@ -159,11 +167,21 @@ void main() {
     float spec = pow(max(dot(R, V), 0.0), p);
     float distance = length(lightPos - FragPos);
     float attenuation = 1.0 / (1.0 + 0.05 * distance + 0.01 * (distance * distance));
+    vec3 lighting = (Kd * diff + Ks * spec) * lightColor * attenuation;
 
-    float bias = max(0.0020 * (1.0 - dot(N, L)), 0.0007);
+    // ===== Две одинаковые бра: одинаковые коэффициенты, разница только в позиции =====
+    float bias = max(0.0020 * (1.0 - max(dot(N, normalize(wallLampPos[0] - FragPos)), 0.0)), 0.0007);
     float shadow = ShadowCalculation(FragPosLightSpace, bias);
 
-    vec3 lighting = (Kd * diff + Ks * spec) * lightColor * attenuation * (1.0 - shadow);
+    for (int i = 0; i < 2; i++) {
+        vec3 Lw = normalize(wallLampPos[i] - FragPos);
+        float diffW = max(dot(N, Lw), 0.0);
+        vec3 Rw = reflect(-Lw, N);
+        float specW = pow(max(dot(Rw, V), 0.0), p);
+        float distW = length(wallLampPos[i] - FragPos);
+        float attW = 1.0 / (1.0 + 0.10 * distW + 0.03 * (distW * distW));
+        lighting += (Kd * diffW + Ks * specW) * wallLampColor * attW * (1.0 - shadow);
+    }
 
     vec3 finalColor = (ambient + lighting) * baseColor;
     FragColor = vec4(finalColor, 1.0);
@@ -534,7 +552,7 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Museum (Ceiling Lamp Only)", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Museum (Door Between Lamps)", nullptr, nullptr);
     if (!window) {
         std::cout << "Failed to create GLFW window" << std::endl;
         glfwTerminate();
@@ -604,7 +622,7 @@ int main() {
         { catModel,   glm::vec3(2.9f, 0.30f,  0.0f), -90.0f, 5.0f, catTex }
     };
 
-    // ===== ОДНА КАРТА ТЕНЕЙ — от потолочной лампы =====
+    // ===== ОДНА ОБЩАЯ КАРТА ТЕНЕЙ =====
     unsigned int depthMapFBO, depthMap;
     glGenFramebuffers(1, &depthMapFBO);
     glGenTextures(1, &depthMap);
@@ -628,14 +646,20 @@ int main() {
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    glm::vec3 lightPos = CEILING_LAMP_POS;
+    glm::vec3 lightPos = glm::vec3(0.0f, 3.8f, 0.0f);
     glm::vec3 lightColor = glm::vec3(1.0f, 1.0f, 1.0f);
 
-    // ===== Матрица для потолочной лампы — смотрит вниз =====
-    glm::vec3 ceilingLightTarget = glm::vec3(0.0f, 0.0f, 0.0f);
-    glm::mat4 ceilingLightProj = glm::ortho(-4.5f, 4.5f, -4.5f, 4.5f, 0.1f, 8.0f);
-    glm::mat4 ceilingLightView = glm::lookAt(lightPos, ceilingLightTarget, glm::vec3(0, 0, -1));
-    glm::mat4 lightSpaceMatrix = ceilingLightProj * ceilingLightView;
+    // Две одинаковые бра симметрично относительно центра стены
+    glm::vec3 wallLampPositions[2] = { WALL_LAMP_POS, WALL_LAMP2_POS };
+    glm::vec3 wallLampColor = glm::vec3(1.0f, 0.9f, 0.7f);
+
+    // Точка тени — центр между брами
+    glm::vec3 shadowLightPos = glm::vec3(0.0f, 2.2f, 3.3f);
+    glm::vec3 shadowLightTarget = glm::vec3(0.0f, 1.0f, 0.0f);
+
+    glm::mat4 lightProj = glm::ortho(-4.5f, 4.5f, -4.5f, 4.5f, 0.1f, 12.0f);
+    glm::mat4 lightView = glm::lookAt(shadowLightPos, shadowLightTarget, glm::vec3(0, 1, 0));
+    glm::mat4 lightSpaceMatrix = lightProj * lightView;
 
     Material matFloor = { {0.55f, 0.27f, 0.07f}, 0.2f, 0.8f, 0.0f,  1.0f,  false, true };
     Material matWall = { {0.9f, 0.9f, 0.9f},    0.2f, 0.8f, 0.0f,  1.0f,  false, false };
@@ -662,28 +686,40 @@ int main() {
         {{DOOR_POS.x + 0.65f, DOOR_POS.y, DOOR_POS.z + 0.01f}, {0.1f, 2.6f, 0.1f}, matWood, 0, WALL},
         {{DOOR_POS.x,         DOOR_POS.y + 1.30f, DOOR_POS.z + 0.01f}, {1.4f, 0.1f, 0.1f}, matWood, 0, WALL},
 
-        // Картины на задней стене
-        {{-1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
-        {{-1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 1, PAINTING},
-        {{1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
-        {{1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 2, PAINTING},
+        // Две одинаковые лампы-бра по бокам двери
+        {{WALL_LAMP_POS.x,  WALL_LAMP_POS.y,  WALL_LAMP_POS.z},
+         {0.35f, 0.5f, 0.15f}, matLamp, 0, LAMP},
+        {{WALL_LAMP2_POS.x, WALL_LAMP2_POS.y, WALL_LAMP2_POS.z},
+         {0.35f, 0.5f, 0.15f}, matLamp, 0, LAMP},
 
-        // Картины на боковых стенах
-        {{-3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
-        {{-3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 3, PAINTING},
-        {{-3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
-        {{-3.92f, 2.2f, 1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 4, PAINTING},
-        {{3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
-        {{3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 5, PAINTING},
-        {{3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
-        {{3.92f, 2.2f, 1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 6, PAINTING},
+         // Одинаковые золотые кронштейны под обеими бра
+         {{WALL_LAMP_POS.x,  WALL_LAMP_POS.y - 0.30f, 3.90f},
+          {0.08f, 0.12f, 0.08f}, matGold, 0, GOLD_BAR},
+         {{WALL_LAMP2_POS.x, WALL_LAMP2_POS.y - 0.30f, 3.90f},
+          {0.08f, 0.12f, 0.08f}, matGold, 0, GOLD_BAR},
 
-        {lightPos, {0.3f, 0.1f, 0.3f}, matLamp, 0, LAMP},
+          // Картины на задней стене
+          {{-1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
+          {{-1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 1, PAINTING},
+          {{1.8f, 2.2f, -3.94f}, {1.4f, 1.4f, 0.05f}, matWood, 0, FRAME},
+          {{1.8f, 2.2f, -3.92f}, {1.2f, 1.2f, 0.05f}, matPaint, 2, PAINTING},
 
-        // Пьедесталы
-        {{0.0f, 0.15f, -2.6f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
-        {{-2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
-        {{ 2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE}
+          // Картины на боковых стенах
+          {{-3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
+          {{-3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 3, PAINTING},
+          {{-3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
+          {{-3.92f, 2.2f, 1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 4, PAINTING},
+          {{3.94f, 2.2f, -1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
+          {{3.92f, 2.2f, -1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 5, PAINTING},
+          {{3.94f, 2.2f, 1.5f}, {0.05f, 1.4f, 1.4f}, matWood, 0, FRAME},
+          {{3.92f, 2.2f, 1.5f}, {0.05f, 1.2f, 1.2f}, matPaint, 6, PAINTING},
+
+          {lightPos, {0.3f, 0.1f, 0.3f}, matLamp, 0, LAMP},
+
+          // Пьедесталы
+          {{0.0f, 0.15f, -2.6f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
+          {{-2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE},
+          {{ 2.9f, 0.15f, 0.0f}, {1.2f, 0.30f, 1.2f}, matPedestal, 0, SCULPTURE}
     };
 
     addGoldBarsAndRibbons(objects, glm::vec3(0.0f, 0.0f, -2.6f), 0.0f, matGold, matRibbon);
@@ -696,7 +732,7 @@ int main() {
         lastFrame = currentFrame;
         processInput(window);
 
-        // ===== 1. ТЕНЕВОЙ ПРОХОД: одна карта от потолочной лампы =====
+        // ===== 1. ТЕНЕВОЙ ПРОХОД =====
         glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
         glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
         glClear(GL_DEPTH_BUFFER_BIT);
@@ -723,7 +759,7 @@ int main() {
             st.model->Draw();
         }
 
-        // Дверная ручка
+        // Тень от дверной ручки (ручка — у правого края двери)
         {
             float handleX = DOOR_POS.x + 0.45f;
             float handleY = DOOR_POS.y - 0.05f;
@@ -767,7 +803,11 @@ int main() {
         glUniform3fv(glGetUniformLocation(mainProgram, "lightPos"), 1, glm::value_ptr(lightPos));
         glUniform3fv(glGetUniformLocation(mainProgram, "lightColor"), 1, glm::value_ptr(lightColor));
 
-        // Карта теней -> юнит 0, диффузная текстура -> юнит 1
+        glUniform3fv(glGetUniformLocation(mainProgram, "wallLampPos"), 2,
+            glm::value_ptr(wallLampPositions[0]));
+        glUniform3fv(glGetUniformLocation(mainProgram, "wallLampColor"), 1,
+            glm::value_ptr(wallLampColor));
+
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, depthMap);
         glUniform1i(glGetUniformLocation(mainProgram, "shadowMap"), 0);
@@ -837,7 +877,7 @@ int main() {
             glDrawElements(GL_TRIANGLES, sphereIndices.size(), GL_UNSIGNED_INT, 0);
         }
 
-        // ===== СВЕТЯЩИЙСЯ ПЛАФОН ПОТОЛОЧНОЙ ЛАМПЫ =====
+        // ===== СВЕТЯЩИЕСЯ ПЛАФОНЫ ДВУХ ОДИНАКОВЫХ БРА =====
         glUniform3fv(glGetUniformLocation(mainProgram, "objectColor"), 1, glm::value_ptr(glm::vec3(1.0f)));
         glUniform1f(glGetUniformLocation(mainProgram, "Ka"), 1.0f);
         glUniform1f(glGetUniformLocation(mainProgram, "Kd"), 0.0f);
@@ -847,9 +887,10 @@ int main() {
         glUniform1i(glGetUniformLocation(mainProgram, "useTexture"), 0);
 
         glBindVertexArray(sphVAO);
-        {
-            glm::mat4 lampModel = glm::translate(glm::mat4(1.0f), lightPos);
-            lampModel = glm::scale(lampModel, glm::vec3(0.4f));
+        for (int i = 0; i < 2; i++) {
+            glm::mat4 lampModel = glm::translate(glm::mat4(1.0f),
+                wallLampPositions[i] + glm::vec3(0.0f, 0.05f, -0.12f));
+            lampModel = glm::scale(lampModel, glm::vec3(0.28f));
             glUniformMatrix4fv(glGetUniformLocation(mainProgram, "model"), 1, GL_FALSE,
                 glm::value_ptr(lampModel));
             glDrawElements(GL_TRIANGLES, sphereIndices.size(), GL_UNSIGNED_INT, 0);
